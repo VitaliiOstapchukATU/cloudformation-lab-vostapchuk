@@ -1,0 +1,28 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Part A1 - Static website hosting with Amazon S3'
+
+Parameters:
+  StudentName:
+    Type: String
+    Default: Vitalii Ostapchuk
+    Description: Student name for the lab
+
+# Creating an S3 bucket for static website hosting.
+Resources:
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'cloudformation-lab-${AWS::AccountId}-${AWS::Region}'
+# Configuring the bucket for static website hosting.
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+
+Outputs:
+  WebsiteBucketName:
+    Description: Name of the S3 bucket
+    Value: !Ref WebsiteBucket
+
+  WebsiteURL:
+    Description: Static website endpoint
+    Value: !GetAtt WebsiteBucket.WebsiteURL
