@@ -1,0 +1,83 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  Three-tier web application architecture.
+  Part A2 - CloudFormation Lab.
+  Student: Vitalii Ostapchuk (L00205711)
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    Description: Environment name used for resource naming.
+
+Resources:
+  # Main virtual network for all resources in the three-tier architecture.
+  MainVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      # Private IP address range available for subnets inside this VPC.
+      CidrBlock: 10.0.0.0/16
+      # Enables DNS resolution and DNS hostnames inside the VPC.
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-vpc'
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      # Connects this subnet to the main VPC.
+      VpcId: !Ref MainVPC
+
+      # Allocates a smaller IP address range within the VPC.
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-subnet'
+
+  # Internet Gateway provides a connection between the VPC and the internet.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-igw'
+
+  # Attaches the Internet Gateway to the main VPC.
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MainVPC
+      InternetGatewayId: !Ref InternetGateway
+
+   # Route table that controls internet traffic for the public subnet.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MainVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-rt'     
+  # Sends all external IPv4 traffic from this route table to the Internet Gateway.
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  # Associates the public route table with the public subnet.
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+Outputs: {}
