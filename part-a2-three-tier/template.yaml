@@ -80,4 +80,62 @@ Resources:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref PublicRouteTable
 
+  # Security group that allows users to access the Web Tier over HTTP and HTTPS.
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP and HTTPS traffic to the Web Tier
+      VpcId: !Ref MainVPC
+
+      SecurityGroupIngress:
+        - Description: Allow HTTP traffic from the internet
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+        - Description: Allow HTTPS traffic from the internet
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-web-sg'
+    # Security group that allows application traffic only from the Web Tier.
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow application traffic from the Web Tier only
+      VpcId: !Ref MainVPC
+
+      SecurityGroupIngress:
+        - Description: Allow traffic from the Web Tier
+          IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-app-sg'
+  # Security group that allows MySQL connections only from the Application Tier.
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow MySQL traffic from the Application Tier only
+      VpcId: !Ref MainVPC
+
+      SecurityGroupIngress:
+        - Description: Allow MySQL connections from the Application Tier
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-database-sg'
+
 Outputs: {}
