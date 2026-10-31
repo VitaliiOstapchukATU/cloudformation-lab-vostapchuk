@@ -12,6 +12,11 @@ Parameters:
     Default: dev
     Description: Environment name used for resource naming.
 
+  # Retrieves the latest Amazon Linux 2023 AMI for the selected AWS region.
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
+
 Resources:
   # Main virtual network for all resources in the three-tier architecture.
   MainVPC:
@@ -137,5 +142,49 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-database-sg'
+  # EC2 instance hosting the public website using Nginx.
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      # Uses the latest Amazon Linux 2023 AMI from SSM Parameter Store.
+      ImageId: !Ref LatestAmiId
 
-Outputs: {}
+      # Small instance suitable for this educational project.
+      InstanceType: t3.micro
+
+      # Places the web server inside the public subnet.
+      SubnetId: !Ref PublicSubnet
+
+      # Allows inbound HTTP and HTTPS traffic.
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+
+
+      # Automatically installs and starts Nginx on first boot.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf update -y
+          dnf install -y nginx
+          systemctl enable nginx
+          systemctl start nginx
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-web-server'
+
+Outputs:
+  # Displays the public IP address of the Web Server.
+  WebServerPublicIP:
+    Description: Public IP address of the Web Server
+    Value: !GetAtt WebServer.PublicIp
+
+  # Displays the public DNS name of the Web Server.
+  WebServerPublicDNS:
+    Description: Public DNS name of the Web Server
+    Value: !GetAtt WebServer.PublicDnsName
+
+  # Provides a direct link to the website hosted by Nginx.
+  WebsiteURL:
+    Description: URL of the hosted website
+    Value: !Sub 'http://${WebServer.PublicDnsName}'
