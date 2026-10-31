@@ -16,6 +16,27 @@ Parameters:
   LatestAmiId:
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
+    # Name of the MySQL database.
+  DBName:
+    Type: String
+    Default: labdb
+    Description: Name of the application database.
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+
+  # Database administrator username.
+  DBUsername:
+    Type: String
+    Default: dbadmin
+    Description: Master username for the MySQL database.
+
+  # Database administrator password.
+  # NoEcho prevents CloudFormation from displaying the password in normal parameter views.
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    MaxLength: 41
+    Description: Master password for the MySQL database.
 
 Resources:
   # Main virtual network for all resources in the three-tier architecture.
@@ -47,6 +68,62 @@ Resources:
         - Key: Name
           Value: !Sub '${EnvironmentName}-public-subnet'
 
+  # Private subnet for the Application Tier.
+  # Instances in this subnet do not receive public IP addresses.
+  AppSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+
+      # Separate IP address range for application resources.
+      CidrBlock: 10.0.2.0/24
+
+      # Uses the same Availability Zone as the Web Tier.
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+      # Do not automatically assign public IPv4 addresses.
+      MapPublicIpOnLaunch: false
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-app-private-subnet'
+
+  # Second private subnet required for the RDS DB Subnet Group.
+  DatabaseSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+
+      # Separate IP address range for database resources.
+      CidrBlock: 10.0.3.0/24
+
+      # Uses a different Availability Zone from the other subnets.
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+      # Database resources do not need public IP addresses.
+      MapPublicIpOnLaunch: false
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-database-private-subnet'
+  # Second database subnet in a different Availability Zone.
+  DatabaseSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+
+      # Uses a separate IP address range.
+      CidrBlock: 10.0.4.0/24
+
+      # Uses the other Availability Zone.
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+      # Database resources do not need public IP addresses.
+      MapPublicIpOnLaunch: false
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-database-private-subnet-2'
   # Internet Gateway provides a connection between the VPC and the internet.
   InternetGateway:
     Type: AWS::EC2::InternetGateway
@@ -85,6 +162,35 @@ Resources:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref PublicRouteTable
 
+  # Route table for private application resources.
+  # No internet gateway route is configured here.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MainVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-rt'
+
+  # Associates the private route table with the application subnet.
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Associates the database subnet with the private route table.
+  DatabaseSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnet
+      RouteTableId: !Ref PrivateRouteTable
+  # Associates the second database subnet with the private route table.
+  DatabaseSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnet2
+      RouteTableId: !Ref PrivateRouteTable
   # Security group that allows users to access the Web Tier over HTTP and HTTPS.
   WebSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -99,16 +205,11 @@ Resources:
           ToPort: 80
           CidrIp: 0.0.0.0/0
 
-        - Description: Allow HTTPS traffic from the internet
-          IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
 
       Tags:
         - Key: Name
           Value: !Sub '${EnvironmentName}-web-sg'
-    # Security group that allows application traffic only from the Web Tier.
+  # Security group that allows application traffic only from the Web Tier.
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -173,6 +274,78 @@ Resources:
         - Key: Name
           Value: !Sub '${EnvironmentName}-web-server'
 
+  # EC2 instance hosting the Python application.
+  ApplicationServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      # Uses the same Amazon Linux 2023 AMI as the Web Tier.
+      ImageId: !Ref LatestAmiId
+
+      # Small instance suitable for this educational project.
+      InstanceType: t3.micro
+
+      # Places the application server in the private subnet.
+      SubnetId: !Ref AppSubnet
+
+      # Allows application traffic only from the Web Tier.
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-app-server'
+  # Defining the private subnets available to Amazon RDS.
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for the database tier.
+      SubnetIds:
+        - !Ref DatabaseSubnet
+        - !Ref DatabaseSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-database-subnet-group'
+  # MySQL database hosted by Amazon RDS in private subnets.
+  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      # MySQL database engine.
+      Engine: mysql
+      EngineVersion: '8.0.46'
+
+      # Small instance for the educational project.
+      DBInstanceClass: db.t3.micro
+
+      # Database storage configuration.
+      AllocatedStorage: 20
+      StorageType: gp3
+      StorageEncrypted: true
+
+      # Database credentials supplied through CloudFormation parameters.
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+
+      # Places the database in the private database subnets.
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+
+      # Allows database connections only from the Application Tier.
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+
+      # Disables public internet access.
+      PubliclyAccessible: false
+
+      # Uses a single Availability Zone to reduce costs.
+      MultiAZ: false
+
+      # Retains the database when the CloudFormation stack is deleted.
+      DeletionProtection: false
+      BackupRetentionPeriod: 1
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-mysql-database'
 Outputs:
   # Displays the public IP address of the Web Server.
   WebServerPublicIP:
@@ -188,3 +361,7 @@ Outputs:
   WebsiteURL:
     Description: URL of the hosted website
     Value: !Sub 'http://${WebServer.PublicDnsName}'
+  # Displays the private IP address of the Application Server.
+  ApplicationServerPrivateIP:
+    Description: Private IP address of the Application Server
+    Value: !GetAtt ApplicationServer.PrivateIp
