@@ -1,0 +1,620 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  Three-tier web application architecture.
+  Part A2 - CloudFormation Lab.
+  Student: Vitalii Ostapchuk (L00205711)
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    Description: Environment name used for resource naming.
+
+  # Retrieves the latest Amazon Linux 2023 AMI for the selected AWS region.
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
+  # Name of the MySQL database.
+  DBName:
+    Type: String
+    Default: labdb
+    Description: Name of the application database.
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+
+  # Database administrator username.
+  DBUsername:
+    Type: String
+    Default: dbadmin
+    Description: Master username for the MySQL database.
+
+
+  # Controls whether the Application Server is created.
+  DeployApplicationServer:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Set to true to deploy the Application Server.
+Conditions:
+  CreateApplicationServer: !Equals
+    - !Ref DeployApplicationServer
+    - 'true'
+
+Resources:
+  # Main virtual network for all resources in the three-tier architecture.
+  MainVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      # Private IP address range available for subnets inside this VPC.
+      CidrBlock: 10.0.0.0/16
+      # Enables DNS resolution and DNS hostnames inside the VPC.
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-vpc'
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      # Connects this subnet to the main VPC.
+      VpcId: !Ref MainVPC
+
+      # Allocates a smaller IP address range within the VPC.
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-subnet'
+
+  # Private subnet for the Application Tier.
+  # Instances in this subnet do not receive public IP addresses.
+  AppSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+
+      # Separate IP address range for application resources.
+      CidrBlock: 10.0.2.0/24
+
+      # Uses the same Availability Zone as the Web Tier.
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+      # Do not automatically assign public IPv4 addresses.
+      MapPublicIpOnLaunch: false
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-app-private-subnet'
+
+  # Second private subnet required for the RDS DB Subnet Group.
+  DatabaseSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+
+      # Separate IP address range for database resources.
+      CidrBlock: 10.0.3.0/24
+
+      # Uses a different Availability Zone from the other subnets.
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+      # Database resources do not need public IP addresses.
+      MapPublicIpOnLaunch: false
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-database-private-subnet'
+  # Second database subnet in a different Availability Zone.
+  DatabaseSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+
+      # Uses a separate IP address range.
+      CidrBlock: 10.0.4.0/24
+
+      # Uses the other Availability Zone.
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+      # Database resources do not need public IP addresses.
+      MapPublicIpOnLaunch: false
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-database-private-subnet-2'
+  # Internet Gateway provides a connection between the VPC and the internet.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-igw'
+
+  # Attaches the Internet Gateway to the main VPC.
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MainVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Route table that controls internet traffic for the public subnet.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MainVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-public-rt'     
+  # Sends all external IPv4 traffic from this route table to the Internet Gateway.
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  # Associates the public route table with the public subnet.
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Route table for private application resources.
+  # No internet gateway route is configured here.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MainVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-private-rt'
+  # Provides private access to Amazon S3 without requiring a NAT Gateway.
+  # The endpoint adds an S3 route to the private route table.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref MainVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+  # Associates the private route table with the application subnet.
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Associates the database subnet with the private route table.
+  DatabaseSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnet
+      RouteTableId: !Ref PrivateRouteTable
+  # Associates the second database subnet with the private route table.
+  DatabaseSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+  # Security group that allows public HTTP access to the Web Tier.
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP traffic to the Web Tier
+      VpcId: !Ref MainVPC
+
+      SecurityGroupIngress:
+        - Description: Allow HTTP traffic from the internet
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-web-sg'
+  # Security group that allows application traffic only from the Web Tier.
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow application traffic from the Web Tier only
+      VpcId: !Ref MainVPC
+
+      SecurityGroupIngress:
+        - Description: Allow traffic from the Web Tier
+          IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-app-sg'
+  # Security group that allows MySQL connections only from the Application Tier.
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow MySQL traffic from the Application Tier only
+      VpcId: !Ref MainVPC
+
+      SecurityGroupIngress:
+        - Description: Allow MySQL connections from the Application Tier
+          IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-database-sg'
+  # Allows the Application Server to access Secrets Manager over HTTPS.
+  SecretsManagerEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateApplicationServer
+    Properties:
+      GroupDescription: Allow HTTPS from the Application Server to Secrets Manager.
+      VpcId: !Ref MainVPC
+      SecurityGroupIngress:
+        - Description: HTTPS access from the Application Tier.
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-secrets-manager-endpoint-sg'
+  # Provides private access to AWS Secrets Manager without using a NAT Gateway.
+  SecretsManagerVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateApplicationServer
+    Properties:
+      VpcId: !Ref MainVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref AppSubnet
+      SecurityGroupIds:
+        - !Ref SecretsManagerEndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-secrets-manager-endpoint'
+
+  # EC2 instance hosting the public website using Nginx.
+  WebServer:
+    Type: AWS::EC2::Instance
+    Condition: CreateApplicationServer
+    DependsOn: ApplicationServer
+    Properties:
+      # Uses the latest Amazon Linux 2023 AMI from SSM Parameter Store.
+      ImageId: !Ref LatestAmiId
+
+      # Small instance suitable for this educational project.
+      InstanceType: t3.micro
+
+      # Places the web server inside the public subnet.
+      SubnetId: !Ref PublicSubnet
+
+      # Allows inbound HTTP traffic.
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup
+
+
+      # Installs Nginx and configures it as a reverse proxy.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+
+          # Install Nginx.
+          dnf install -y nginx
+
+          # Configure Nginx to forward requests to the Application Server.
+          cat > /etc/nginx/conf.d/default.conf <<'EOF'
+          server {
+              listen 80 default_server;
+              server_name _;
+
+              location / {
+                  proxy_pass http://${ApplicationServer.PrivateIp}:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+          EOF
+
+          # Validate the Nginx configuration and start the service.
+          nginx -t
+          systemctl enable --now nginx
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-web-server'
+
+  # EC2 instance hosting the private Python application.
+  ApplicationServer:
+    Type: AWS::EC2::Instance
+    Condition: CreateApplicationServer
+    DependsOn:
+      - ApplicationServerS3Policy
+      - S3GatewayEndpoint
+      - SecretsManagerVPCEndpoint
+    Properties:
+
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      IamInstanceProfile: !Ref ApplicationServerInstanceProfile
+      SubnetId: !Ref AppSubnet
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+
+      # Downloads application files and retrieves database credentials.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          umask 077
+
+          # Create application directories.
+          mkdir -p /opt/three-tier-app/packages
+          mkdir -p /opt/three-tier-app/vendor
+
+          # Download the Python application from S3.
+          aws s3 cp s3://${ApplicationArtifactsBucket}/app.py \
+            /opt/three-tier-app/app.py \
+            --region ${AWS::Region}
+
+          # Download the PyMySQL wheel from S3.
+          aws s3 cp s3://${ApplicationArtifactsBucket}/packages/pymysql-1.2.3-py3-none-any.whl \
+            /opt/three-tier-app/packages/pymysql-1.2.3-py3-none-any.whl \
+            --region ${AWS::Region}
+
+          # Extract PyMySQL without requiring internet access.
+          python3 - <<'PY'
+          import zipfile
+
+          wheel = "/opt/three-tier-app/packages/pymysql-1.2.3-py3-none-any.whl"
+          destination = "/opt/three-tier-app/vendor"
+
+          with zipfile.ZipFile(wheel) as archive:
+              archive.extractall(destination)
+          PY
+
+          # Retrieve the RDS credentials from Secrets Manager.
+          for attempt in $(seq 1 10); do
+            if aws secretsmanager get-secret-value \
+              --secret-id '${Database.MasterUserSecret.SecretArn}' \
+              --query SecretString \
+              --output text \
+              --region ${AWS::Region} \
+              > /root/db-secret.json; then
+              break
+            fi
+            sleep 6
+          done
+
+          test -s /root/db-secret.json
+
+          # Create a protected environment file for the application.
+          DB_HOST='${Database.Endpoint.Address}' DB_NAME='${DBName}' \
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("/root/db-secret.json") as file:
+              secret = json.load(file)
+
+          settings = {
+              "DB_HOST": os.environ["DB_HOST"],
+              "DB_NAME": os.environ["DB_NAME"],
+              "DB_USER": secret["username"],
+              "DB_PASSWORD": secret["password"]
+          }
+
+          with open("/etc/three-tier-app.env", "w") as file:
+              for key, value in settings.items():
+                  file.write(f"{key}={json.dumps(value)}\n")
+          PY
+
+          chmod 600 /etc/three-tier-app.env
+          rm -f /root/db-secret.json
+
+          # Create the systemd service.
+          cat > /etc/systemd/system/three-tier-app.service <<'EOF'
+          [Unit]
+          Description=Three Tier Demo Application
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=/opt/three-tier-app
+          EnvironmentFile=/etc/three-tier-app.env
+          Environment=PYTHONPATH=/opt/three-tier-app/vendor
+          ExecStart=/usr/bin/python3 /opt/three-tier-app/app.py
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # Enable and start the application.
+          systemctl daemon-reload
+          systemctl enable --now three-tier-app
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-app-server'
+
+  # Defining the private subnets available to Amazon RDS.
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for the database tier.
+      SubnetIds:
+        - !Ref DatabaseSubnet
+        - !Ref DatabaseSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-database-subnet-group'
+  # S3 bucket used to store application files for the private Application Server.
+  # The bucket is private and accessible only through authorised AWS permissions.
+  ApplicationArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Encrypts stored objects using Amazon S3-managed encryption keys.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Enable versioning to keep previous versions of application files.
+      VersioningConfiguration:
+        Status: Enabled
+
+      # Prevent public access to application artifacts.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-application-artifacts'
+  # IAM role assigned to the Application Server.
+  # Allows the EC2 instance to access AWS services securely without storing credentials.
+  ApplicationServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-app-server-role'
+  # Grants the Application Server read-only access to application artifacts in S3.
+  ApplicationServerS3Policy:
+    Type: AWS::IAM::Policy
+    Condition: CreateApplicationServer
+    Properties:
+      PolicyName: !Sub '${EnvironmentName}-app-s3-access-policy'
+      Roles:
+        - !Ref ApplicationServerRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allows listing objects in the application artifacts bucket.
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !GetAtt ApplicationArtifactsBucket.Arn
+
+          # Allows downloading application files from the bucket.
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource: !Sub '${ApplicationArtifactsBucket.Arn}/*'
+          # Allows the Application Server to retrieve its database credentials.
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !GetAtt Database.MasterUserSecret.SecretArn
+
+  # Connects the IAM role to the EC2 instance.
+  ApplicationServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ApplicationServerRole
+  # MySQL database hosted by Amazon RDS in private subnets.
+  Database:
+    Type: AWS::RDS::DBInstance
+    Condition: CreateApplicationServer
+    Properties:
+      # MySQL database engine.
+      Engine: mysql
+      EngineVersion: '8.0.46'
+
+      # Small instance for the educational project.
+      DBInstanceClass: db.t3.micro
+
+      # Database storage configuration.
+      AllocatedStorage: 20
+      StorageType: gp3
+      StorageEncrypted: true
+
+      # Configures the database name and administrator username.
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+
+      # AWS generates and manages the master password in Secrets Manager.
+      ManageMasterUserPassword: true
+
+      # Places the database in the private database subnets.
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+
+      # Allows database connections only from the Application Tier.
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+
+      # Disables public internet access.
+      PubliclyAccessible: false
+
+      # Uses a single Availability Zone to reduce costs.
+      MultiAZ: false
+
+      # Allows the database to be deleted with the CloudFormation stack.
+      DeletionProtection: false
+      BackupRetentionPeriod: 1
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-mysql-database'
+Outputs:
+  # Displays the public IP address of the Web Server.
+  WebServerPublicIP:
+    Condition: CreateApplicationServer
+    Description: Public IP address of the Web Server
+    Value: !GetAtt WebServer.PublicIp
+
+  # Displays the public DNS name of the Web Server.
+  WebServerPublicDNS:
+    Condition: CreateApplicationServer
+    Description: Public DNS name of the Web Server
+    Value: !GetAtt WebServer.PublicDnsName
+
+  # Provides a direct link to the website hosted by Nginx.
+  WebsiteURL:
+    Condition: CreateApplicationServer
+    Description: URL of the hosted website
+    Value: !Sub 'http://${WebServer.PublicDnsName}'
+  # Displays the private IP address when the Application Server is deployed.
+  ApplicationServerPrivateIP:
+    Condition: CreateApplicationServer
+    Description: Private IP address of the Application Server
+    Value: !GetAtt ApplicationServer.PrivateIp
+  # Displays the name of the S3 bucket used to store application files.
+  ApplicationArtifactsBucketName:
+    Description: Name of the private S3 bucket for application artifacts
+    Value: !Ref ApplicationArtifactsBucket

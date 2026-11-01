@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Part A1 - Static website hosting with Amazon S3 and CloudFront'
+
+Parameters:
+  StudentName:
+    Type: String
+    Default: 'Vitalii Ostapchuk'
+    Description: 'Student name for the lab'
+
+# Creating an S3 bucket for static website hosting.
+Resources:
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Configuring the bucket for static website hosting.
+      # S3 bucket names must be globally unique.
+      BucketName: !Sub 'cloudformation-lab-${AWS::AccountId}-${AWS::Region}'
+
+      # Keep the bucket private and block public access.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+      # Enable versioning to help recover previous file versions.
+      VersioningConfiguration:
+        Status: Enabled
+
+      Tags:
+        - Key: StudentName
+          Value: !Ref StudentName
+        - Key: Project
+          Value: CloudFormationLab
+
+  # Configuring secure access from CloudFront to the private S3 bucket.
+  WebsiteOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-OAC'
+        Description: 'Secure access from CloudFront to the S3 bucket'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # Creating a public-facing HTTPS distribution for the website.
+  WebsiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Comment: 'CloudFormation Lab static website'
+
+        Origins:
+          - Id: S3WebsiteOrigin
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt WebsiteOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+
+        DefaultCacheBehavior:
+          TargetOriginId: S3WebsiteOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+
+        # Show a custom error page for missing or inaccessible objects.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 404
+            ResponsePagePath: /error.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 404
+            ResponsePagePath: /error.html
+            ErrorCachingMinTTL: 10
+
+  # Allow only this CloudFront distribution to read files from S3.
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${WebsiteDistribution}'
+
+Outputs:
+  WebsiteBucketName:
+    Description: 'Name of the private S3 bucket'
+    Value: !Ref WebsiteBucket
+
+  WebsiteURL:
+    Description: 'Public HTTPS URL of the website'
+    Value: !Sub 'https://${WebsiteDistribution.DomainName}'
+
+  CloudFrontDistributionId:
+    Description: 'CloudFront distribution ID'
+    Value: !Ref WebsiteDistribution
