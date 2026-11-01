@@ -148,11 +148,13 @@ This is an educational implementation rather than a production-ready architectur
 
 These choices keep the architecture relatively simple and help control the cost of the lab.
 
-### 3.5 Validation and Deployment Status
+### 3.5 Validation and Deployment
 
-The CloudFormation template has passed template validation. The Python application has also passed local Python syntax compilation.
+The CloudFormation template was successfully validated using the AWS CLI. The Python application also passed local syntax validation.
 
-The infrastructure has not yet been deployed to AWS. Deployment, integration testing, and cost verification will be documented after these steps are completed.
+The infrastructure deployment was initiated using an AWS CloudFormation change set. The deployment completed successfully with a `CREATE_COMPLETE` status.
+
+The deployed resources include the VPC, public and private subnets, route tables, security groups, IAM resources, and a private S3 bucket. The Python application and PyMySQL dependency were successfully uploaded to Amazon S3.
 
 ## 4. DevOps Practices
 
@@ -194,4 +196,4 @@ AI-generated guidance was reviewed and tested against the AWS environment.
 
 Part A1 demonstrates how AWS CloudFormation can provision infrastructure as code for a static website. Amazon S3 stores the website files, while CloudFront provides public HTTPS access without making the S3 bucket public.
 
-Part A2 extends the lab with a three-tier architecture using Amazon EC2, Amazon RDS, VPC networking, security groups, IAM roles, and VPC endpoints. It demonstrates how infrastructure components can be separated into web, application, and database tiers, with a focus on security, private communication, and cost awareness. Deployment and integration testing remain pending.
+Part A2 extends the lab with a three-tier architecture using Amazon EC2, Amazon RDS, VPC networking, security groups, IAM roles, and VPC endpoints. It demonstrates how infrastructure components can be separated into web, application, and database tiers, with a focus on security, private communication, and cost awareness.
